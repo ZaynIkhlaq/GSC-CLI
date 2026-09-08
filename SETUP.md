@@ -82,9 +82,25 @@ gcloud auth login
 **Path A — your own Google login.** Simplest. Good for one person on one machine.
 You already did it in step 1. Skip to step 4 and leave `GSC_SA` unset.
 
-**Path B — a service account.** Use this when an agent, a CI job, or more than one
-person needs access, or when access must survive someone leaving. The rest of this
-section is Path B.
+**Path B — impersonate a service account, keylessly.** Use this when an agent, a CI
+job, or more than one person needs access, or when access must survive someone
+leaving. Still no key file: your login is the credential, and it *borrows* the
+service account's identity. The rest of this section is Path B.
+
+**Path C — a service account key file.** For **headless machines** — a VPS, a
+container, CI. Path B cannot work there: keyless impersonation needs a human login
+to impersonate *from*, and a server has no browser to log one in with. So a
+headless box has to hold a credential of its own.
+
+Given that, a *scoped service-account key* is the safest thing to put there — much
+safer than running `gcloud auth login` on the box, which would leave a refresh
+token for your entire Google account (Gmail, Drive, all of GCP) sitting on an
+internet-facing machine. A key for a purpose-built service account grants exactly
+one property's Search Console data and nothing else.
+
+Path C needs neither gcloud nor any Python package on the target machine — just
+`python3` and `openssl`. See [Headless machines](#headless-machines-vps-ci-containers)
+below.
 
 ## 3. Create the service account and let yourself impersonate it
 
@@ -198,6 +214,82 @@ So the agent is not stopped by a permission prompt on every call, in
 Deliberately leaving `sitemap-submit` and `sitemap-delete` off the list, so those
 still prompt.
 
+## Headless machines (VPS, CI, containers)
+
+`gcloud` is not needed here at all. `gsc.py` exchanges a service-account key for an
+access token itself: it builds a JWT, signs it RS256 by handing the key to `openssl`
+over a pipe, and POSTs it to Google's token endpoint. Requirements are `python3` and
+`openssl`, both of which any Linux box already has.
+
+### Make the service account as powerless as possible
+
+Two decisions do most of the security work, and both are easy to get wrong:
+
+- **Give it a dedicated service account, not a shared one.** If you reuse the
+  account that runs your Cloud Functions or your data pipeline, its key on a VPS can
+  act as all of those things. Create one whose only purpose is this.
+- **Give it no GCP project roles at all.** Search Console permission is granted
+  inside Search Console (step 4), not through IAM. The service account needs *zero*
+  IAM roles on the project. Verify with:
+
+  ```sh
+  gcloud projects get-iam-policy YOUR_PROJECT \
+    --flatten="bindings[].members" \
+    --filter="bindings.members:gsc-bot@YOUR_PROJECT.iam.gserviceaccount.com" \
+    --format="value(bindings.role)"
+  ```
+
+  Empty output is the goal. It means a leaked key exposes one property's search
+  data and nothing else in your cloud.
+
+Also prefer **Restricted** over **Full** in step 4 unless you actually need the
+agent submitting sitemaps. Restricted is read-only: every analysis command works,
+and `sitemap-submit` / `sitemap-delete` are refused. Sitemaps get refetched
+automatically regardless.
+
+### Install the key without it touching your laptop
+
+Piping through SSH means the key is written once, on the target, and never lands on
+your own disk where you would then have to remember to shred it:
+
+```sh
+gcloud iam service-accounts keys create /dev/stdout \
+  --iam-account=gsc-bot@YOUR_PROJECT.iam.gserviceaccount.com \
+| ssh YOUR_HOST 'umask 077; mkdir -p ~/.gsc && cat > ~/.gsc/key.json'
+```
+
+Then confirm the permissions are `600` on a `700` directory:
+
+```sh
+ssh YOUR_HOST 'chmod 700 ~/.gsc; chmod 600 ~/.gsc/key.json; ls -la ~/.gsc'
+```
+
+Keep the key **outside any git checkout**. `~/.gsc/` is deliberately not in the
+repo, so no `.gitignore` mistake can ever commit it.
+
+### Configure
+
+```sh
+export GSC_SITE='https://www.example.com/'
+export GSC_KEY_FILE="$HOME/.gsc/key.json"
+# GSC_SA is not used on this path -- the key identifies the account.
+```
+
+`GSC_KEY_FILE` takes precedence over gcloud when both are available.
+
+### Rotating and revoking
+
+Keys do not expire. Rotate by creating a new one, installing it, then deleting the
+old:
+
+```sh
+gcloud iam service-accounts keys list --iam-account=SA_EMAIL --managed-by=user
+gcloud iam service-accounts keys delete KEY_ID --iam-account=SA_EMAIL
+```
+
+If a box is compromised, deleting the key cuts it off immediately — which is the
+other reason to give each machine its own dedicated account.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -208,3 +300,5 @@ still prompt.
 | `HTTP 403` on everything | Permission is on a different property, or `GSC_SITE` has the wrong shape. |
 | `HTTP 400 … startDate` | A date outside the 16-month window Search Console retains. |
 | Writes fail, reads work | Permission is **Restricted**. Sitemap writes need **Full**. |
+| `Token exchange failed … invalid_grant` | The key was deleted, or the machine's clock is skewed — the JWT is time-signed. Check `timedatectl`. |
+| `openssl could not sign the JWT` | `GSC_KEY_FILE` is not a service-account key JSON, or `openssl` is missing. |

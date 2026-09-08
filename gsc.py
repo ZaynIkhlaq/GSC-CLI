@@ -11,7 +11,8 @@ Configure with two environment variables (see SETUP.md):
 
 Docs: https://developers.google.com/webmasters/v3/
 """
-import argparse, json, os, subprocess, sys, urllib.request, urllib.error, urllib.parse
+import argparse, base64, json, os, subprocess, sys, time
+import urllib.request, urllib.error, urllib.parse
 from concurrent import futures
 from datetime import date, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from pathlib import Path
 SA = os.environ.get("GSC_SA") or None
 SCOPE = "https://www.googleapis.com/auth/webmasters"
 SITE = os.environ.get("GSC_SITE") or None
+KEY_FILE = os.environ.get("GSC_KEY_FILE") or None
 BASE = "https://www.googleapis.com/webmasters/v3"
 DATA = Path(__file__).parent / "data"
 
@@ -30,22 +32,107 @@ LAG_DAYS = 3
 _TOKEN = None
 
 
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+
+def _sign_rs256(signing_input, private_key_pem):
+    """RS256 via the openssl binary, so this file stays standard-library only.
+
+    The key is handed to openssl through a pipe and referenced as /dev/fd/N rather
+    than written to a temp file: a service-account key should not touch the disk a
+    second time, least of all in /tmp where it would outlive a crash. PEM keys are
+    ~1.7KB, well inside the 64KB pipe buffer, so writing before exec cannot block.
+    """
+    r_fd, w_fd = os.pipe()
+    try:
+        os.write(w_fd, private_key_pem.encode())
+        os.close(w_fd)
+        w_fd = None
+        proc = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", f"/dev/fd/{r_fd}"],
+            input=signing_input, capture_output=True, pass_fds=(r_fd,))
+    finally:
+        if w_fd is not None:
+            os.close(w_fd)
+        os.close(r_fd)
+
+    if proc.returncode != 0:
+        sys.exit(f"openssl could not sign the JWT: {proc.stderr.decode()[:400]}")
+    return proc.stdout
+
+
+def _token_from_key_file(path):
+    """The JWT-bearer flow, for headless machines.
+
+    gcloud's keyless impersonation needs a human login to impersonate *from*, which
+    a server does not have. A service-account key is the alternative, and exchanging
+    it for an access token is a signed JWT and one POST -- no SDK, no dependencies.
+    """
+    try:
+        key = json.loads(Path(path).expanduser().read_text())
+    except (OSError, ValueError) as e:
+        sys.exit(f"Could not read GSC_KEY_FILE at {path}: {e}")
+
+    for field in ("client_email", "private_key"):
+        if not key.get(field):
+            sys.exit(f"{path} is missing `{field}` -- is it a service-account key JSON?")
+
+    aud = key.get("token_uri", "https://oauth2.googleapis.com/token")
+    now = int(time.time())
+    header = {"alg": "RS256", "typ": "JWT"}
+    claims = {
+        "iss": key["client_email"],
+        "scope": SCOPE,
+        "aud": aud,
+        "iat": now,
+        # Google caps assertion lifetime at an hour; the token it returns is
+        # independent of this and lives for its own hour.
+        "exp": now + 3600,
+    }
+    signing_input = _b64(json.dumps(header).encode()) + b"." + _b64(json.dumps(claims).encode())
+    assertion = signing_input + b"." + _b64(_sign_rs256(signing_input, key["private_key"]))
+
+    body = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion.decode(),
+    }).encode()
+    req = urllib.request.Request(
+        aud, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        return json.loads(urllib.request.urlopen(req).read())["access_token"]
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:400]
+        hint = ""
+        if "invalid_grant" in detail:
+            hint = ("\n\ninvalid_grant usually means the key was deleted or the "
+                    "machine clock is skewed -- the JWT is time-signed.")
+        sys.exit(f"Token exchange failed: HTTP {e.code}: {detail}{hint}")
+
+
+def _token_from_gcloud():
+    cmd = ["gcloud", "auth", "print-access-token", f"--scopes={SCOPE}"]
+    if SA:
+        cmd.append(f"--account={SA}")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(
+            f"Could not mint a token via gcloud.\n{r.stderr.strip()}\n\n"
+            "On a laptop: check gcloud is installed and logged in, and that "
+            f"{'the service account ' + SA if SA else 'the active account'} "
+            "can be impersonated.\n"
+            "On a headless machine there is no login to impersonate from -- set "
+            "GSC_KEY_FILE to a service-account key instead. See SETUP.md.")
+    return r.stdout.strip()
+
+
 def token():
-    """Cached for the process. Shelling out to gcloud costs ~1s, which is fine once
-    but crippling on a 105-URL sweep that used to re-mint per request."""
+    """Cached for the process. Either path costs ~0.3-1s, which is fine once but
+    crippling on a sitemap-wide sweep that would otherwise re-mint per request."""
     global _TOKEN
     if _TOKEN is None:
-        cmd = ["gcloud", "auth", "print-access-token", f"--scopes={SCOPE}"]
-        if SA:
-            cmd.append(f"--account={SA}")
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(
-                f"Could not mint a token via gcloud.\n{r.stderr.strip()}\n\n"
-                "Check that gcloud is installed and logged in, and that "
-                f"{'the service account ' + SA if SA else 'the active account'} "
-                "can be impersonated. See SETUP.md.")
-        _TOKEN = r.stdout.strip()
+        _TOKEN = _token_from_key_file(KEY_FILE) if KEY_FILE else _token_from_gcloud()
     return _TOKEN
 
 

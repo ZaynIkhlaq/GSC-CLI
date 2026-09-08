@@ -52,9 +52,27 @@ alias gsc="$PWD/gsc.py"
 | Variable | Required | Meaning |
 |---|---|---|
 | `GSC_SITE` | yes | The property, spelled exactly as Search Console shows it. `https://www.example.com/` for URL-prefix (trailing slash), `sc-domain:example.com` for Domain. |
-| `GSC_SA` | no | Service account email to impersonate. Omit to use whatever `gcloud` is logged in as. |
+| `GSC_SA` | no | Service account email to impersonate via `gcloud`. Omit to use whatever `gcloud` is logged in as. |
+| `GSC_KEY_FILE` | no | Path to a service-account key JSON. Takes precedence over `gcloud`, and removes the need for it entirely — see below. |
 
 `--site` overrides `GSC_SITE` per invocation.
+
+## Two ways to authenticate
+
+**On a laptop — keyless.** `gcloud` mints a short-lived token, optionally
+impersonating a service account. Nothing to rotate, nothing to leak.
+
+**On a headless box — a key file.** Keyless impersonation needs a human login to
+impersonate *from*, so it cannot work on a VPS or in CI. Set `GSC_KEY_FILE` and
+`gsc.py` does the OAuth2 JWT-bearer exchange itself: it builds the JWT, signs it
+RS256 by handing the key to `openssl` through a pipe (never a temp file), and
+exchanges it for a token. **gcloud is not required on that machine** — only
+`python3` and `openssl`.
+
+Do not run `gcloud auth login` on a server to get around this. That leaves a
+refresh token for your whole Google account on the box; a scoped service-account
+key is far less to lose. [SETUP.md](SETUP.md#headless-machines-vps-ci-containers)
+covers making that account powerless enough to be safe.
 
 ## Things that will mislead you
 
