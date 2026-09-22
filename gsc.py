@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Google Search Console CLI — headless access to one property, no key file on disk.
+"""Google Search Console CLI — headless access to one property, standard library only.
 
-Configure with two environment variables (see SETUP.md):
+Configure with environment variables (see SETUP.md):
 
-    GSC_SITE   the property, exactly as Search Console shows it.
-               URL-prefix:  https://www.example.com/   (trailing slash)
-               Domain:      sc-domain:example.com
-    GSC_SA     optional. A service account email to impersonate. Omit to use
-               whatever `gcloud auth print-access-token` is already logged in as.
+    GSC_SITE      the property, exactly as Search Console shows it.
+                  URL-prefix:  https://www.example.com/   (trailing slash)
+                  Domain:      sc-domain:example.com
+    GSC_SA        optional. A service account email to impersonate. Omit to use
+                  whatever `gcloud auth print-access-token` is already logged in as.
+    GSC_KEY_FILE  optional. Path to a service-account key JSON, for headless
+                  machines where there is no gcloud login to impersonate from.
+                  Takes precedence over gcloud; needs only python3 and openssl.
 
 Docs: https://developers.google.com/webmasters/v3/
 """
@@ -183,7 +186,11 @@ def fetch_all(site, body, limit=1_000_000):
 def parse_filters(specs):
     out = []
     for f in specs or []:
-        dim, op, expr = f.split(":", 2)
+        try:
+            dim, op, expr = f.split(":", 2)
+        except ValueError:
+            sys.exit(f"--filter must be dimension:operator:expression, got {f!r}\n"
+                     "e.g. page:contains:/blog")
         out.append({"dimension": dim, "operator": op, "expression": expr})
     return out
 

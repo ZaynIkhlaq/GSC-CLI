@@ -1,7 +1,8 @@
 # gsc-cli
 
 Headless Google Search Console for one property. Pure Python standard library — no
-venv, no `pip install`, no service-account key file on disk.
+venv, no `pip install`, no SDK. On a laptop there is no key file at all; on a
+headless box, one scoped key and nothing else.
 
 Built so a coding agent can drive Search Console itself: pull query data, check
 whether pages are indexed, submit sitemaps, without anyone clicking through the UI.

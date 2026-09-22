@@ -1,7 +1,9 @@
 # Setup
 
 Goal: Claude Code (or any agent, or you in a shell) reads and writes Google Search
-Console for a property, headlessly, with **no key file anywhere on disk**.
+Console for a property, headlessly. On a workstation that means **no key file at
+all** (paths A and B below). A headless box has no login to impersonate from, so it
+holds **one scoped service-account key** and nothing more (path C).
 
 The underlying mechanism is identical for every company. Only four values change.
 Fill in this table and the rest is copy-paste:
@@ -38,9 +40,10 @@ you / Claude Code
       └─ Search Console API for one property
 ```
 
-The credential is a token that expires in an hour. There is no JSON key to rotate,
-leak, or commit. That is the main reason this exists in preference to the usual
-service-account-key-in-a-file setup.
+On this path the credential is a token that expires in an hour — there is no JSON
+key to rotate, leak, or commit. That is the main reason this exists in preference to
+the usual service-account-key-in-a-file setup. Headless machines cannot use it and
+fall back to a key; see [path C](#2-choose-your-auth-path).
 
 ## The whole thing, in one block
 
